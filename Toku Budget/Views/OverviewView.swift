@@ -14,31 +14,23 @@ struct OverviewView: View {
     let mode: DateRangeMode
     @Environment(\.managedObjectContext) private var moc
     @StateObject private var cloudUser = CloudUser()
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.suggestionNavigator) private var navigateSuggestion
 
-    // Current window transactions
     @FetchRequest private var monthTx: FetchedResults<Transaction>
-    // Previous window transactions (for % change)
     @FetchRequest private var prevMonthTx: FetchedResults<Transaction>
-    // Budgets for current month (for Y-axis max)
     @FetchRequest private var budgets: FetchedResults<Budget>
 
-    // Delete-all confirmation
     @State private var confirmDeleteAll = false
 
     init(window: DateWindow, mode: DateRangeMode) {
         self.window = window
         self.mode = mode
 
-        // Current window transactions
         let currReq: NSFetchRequest<Transaction> = Transaction.fetchRequest()
         currReq.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
         currReq.predicate = NSPredicate(format: "date >= %@ AND date < %@",
                                         window.start as NSDate, window.end as NSDate)
         _monthTx = FetchRequest(fetchRequest: currReq, animation: .default)
 
-        // Previous window transactions (for % change)
         let cal = Calendar.current
         let prevEnd = window.start
         let prevStart: Date = {
@@ -55,7 +47,6 @@ struct OverviewView: View {
                                         prevStart as NSDate, prevEnd as NSDate)
         _prevMonthTx = FetchRequest(fetchRequest: prevReq, animation: .default)
 
-        // Budgets (use the month containing window.start)
         let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: window.start))!
         let bReq: NSFetchRequest<Budget> = Budget.fetchRequest()
         bReq.predicate = NSPredicate(format: "periodStart == %@", monthStart as NSDate)
@@ -145,25 +136,21 @@ struct OverviewView: View {
                     }
                 }
 
-                // ⬇️ Smart suggestions (AI-like helper actions)
-                SuggestionsCard(window: window, onAction: navigateSuggestion)
+                // 🔵 AI-only tips card (replaces old SuggestionsCard)
+                AITipsCard(window: window, viewID: "overview")
                     .card()
             }
             .padding(20)
         }
-        // Delete-all confirmation
         .alert("Delete ALL transactions?",
                isPresented: $confirmDeleteAll) {
             Button("Delete", role: .destructive) {
                 deleteAllTransactions()
-                // If you only want the current window:
-                // monthTx.forEach(moc.delete); try? moc.save()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will permanently remove all transactions. This cannot be undone.")
         }
-        // Toolbar button
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button(role: .destructive) { confirmDeleteAll = true } label: {
@@ -192,7 +179,7 @@ private extension OverviewView {
     }
 }
 
-// MARK: - Cards (unchanged from your version)
+// MARK: - Cards (same as before)
 
 struct NetBalanceCard: View {
     let amount: Decimal
@@ -238,8 +225,8 @@ struct NetBalanceCard: View {
                 } else {
                     Text("").hidden()
                 }
-                Spacer()
-                Button("Pay") {}
+//                Spacer()
+//                Button("Pay") {}
             }
             .font(.callout)
         }
@@ -289,7 +276,7 @@ struct UpcomingBillsCard: View {
                         Text((dec as NSDecimalNumber).doubleValue.formatted(.currency(code: s.currencyCode ?? "USD")))
                             .monospacedDigit()
                             .font(.headline)
-                        Button("Pay") { markPaid(s) }
+                        Button("Mark as Paid") { markPaid(s) }
                             .buttonStyle(.bordered)
                     }
                     .padding(.vertical, 4)
@@ -456,83 +443,93 @@ struct SpendBars: View {
     }
 }
 
+// If you ever see ambiguity with SwiftUI.Transaction, uncomment this:
+// typealias Tx = Transaction
+
+
+typealias Tx = Transaction
+
 struct RecentTable: View {
     @Environment(\.managedObjectContext) private var moc
+    @AppStorage("settings.sheets.sortKey") private var sortKey: SheetsSortKey = .dateDesc
 
-    @FetchRequest private var recent: FetchedResults<Transaction>
-    @State private var selection: Set<NSManagedObjectID> = []
+    @FetchRequest private var recentRaw: FetchedResults<Tx>
 
     init() {
-        let req: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        let req: NSFetchRequest<Tx> = Tx.fetchRequest()
         req.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-        req.fetchLimit = 6
-        _recent = FetchRequest(fetchRequest: req, animation: .default)
+        // Remove the limit entirely if you want *all* rows
+        // req.fetchLimit = 0   // or just delete this line
+        _recentRaw = FetchRequest(fetchRequest: req, animation: .default)
+    }
+
+    private var recentSorted: [Tx] {
+        var arr = Array(recentRaw)
+        switch sortKey {
+        case .dateDesc:   arr.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+        case .dateAsc:    arr.sort { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+        case .amountDesc: arr.sort { ($0.amount?.doubleValue ?? 0) > ($1.amount?.doubleValue ?? 0) }
+        case .amountAsc:  arr.sort { ($0.amount?.doubleValue ?? 0) < ($1.amount?.doubleValue ?? 0) }
+        }
+        return arr            // ⬅️ NO prefix() here
     }
 
     private var recentTotal: Decimal {
-        recent.reduce(0) { $0 + ($1.amount?.decimalValue ?? 0) }
+        recentSorted.reduce(0) { $0 + ($1.amount?.decimalValue ?? 0) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Recent").bold()
+            HStack {
+                Text("Recent").bold()
+                Spacer()
+                Text(activeSortLabel).font(.caption).foregroundStyle(.secondary)
+            }
 
-            Table(of: Transaction.self) {
-                TableColumn("Date")     { t in Text(t.date ?? .now, style: .date) }
+            Table(recentSorted) {
+                TableColumn("Date") { t in Text(t.date ?? .now, style: .date) }
                 TableColumn("Category") { t in Text(t.category?.name ?? "—") }
-                TableColumn("Account")  { _ in Text("Visa") }
-                TableColumn("Status")   { _ in Text("Paid").foregroundStyle(.green) }
-                TableColumn("Amount")   { t in
+                TableColumn("Account") { _ in Text("Visa") }
+                TableColumn("Status")  { _ in Text("Paid").foregroundStyle(.green) }
+                TableColumn("Amount")  { t in
                     let dec: Decimal = t.amount?.decimalValue ?? .zero
                     Text((dec as NSDecimalNumber).doubleValue.formatted(.currency(code: t.currencyCode ?? "USD")))
                         .monospacedDigit()
                 }
-                TableColumn("") { t in
+                TableColumn(" ") { t in
                     Button { deleteSingle(t) } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
                         .help("Delete")
                 }
-                .width(32)
-            } rows: {
-                ForEach(recent, id: \.objectID) { t in
-                    TableRow(t)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                deleteSingle(t)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                }
+                .width(36)
             }
-            .onDeleteCommand { deleteSelection() }
             .frame(minHeight: 220)
 
             HStack {
                 Spacer()
-                Text("Total (recent \(recent.count))").foregroundStyle(.secondary)
+                Text("Total (recent \(recentSorted.count))").foregroundStyle(.secondary)
                 Text((recentTotal as NSDecimalNumber).doubleValue.formatted(.currency(code: "USD")))
-                    .bold()
-                    .monospacedDigit()
+                    .bold().monospacedDigit()
             }
             .font(.footnote)
         }
     }
 
-    private func deleteSingle(_ t: Transaction) {
-        moc.delete(t)
-        try? moc.save()
-        selection.remove(t.objectID)
+    private var activeSortLabel: String {
+        switch sortKey {
+        case .dateDesc:   return "Sorted: Date ↓"
+        case .dateAsc:    return "Sorted: Date ↑"
+        case .amountDesc: return "Sorted: Amount ↓"
+        case .amountAsc:  return "Sorted: Amount ↑"
+        }
     }
 
-    private func deleteSelection() {
-        let toDelete = recent.filter { selection.contains($0.objectID) }
-        guard !toDelete.isEmpty else { return }
-        toDelete.forEach(moc.delete)
+    private func deleteSingle(_ t: Tx) {
+        moc.delete(t)
         try? moc.save()
-        selection.removeAll()
     }
 }
+
 
 struct CategoryBreakdownChart: View {
     let txs: [Transaction]

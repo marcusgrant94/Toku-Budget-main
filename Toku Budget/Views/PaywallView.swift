@@ -71,11 +71,14 @@ struct PaywallView: View {
 
                 // Checklist panel
                 FeaturePanel(features: [
-                    "Unlimited transactions & tistory",
-                    "Advanced charts & reports",
+                    "Smart AI assistant to help you manage your budget",
+                    "Personalized money-saving tips",
+                    "Track unlimited transactions with full history",
+                    "Detailed charts and insights into your spending",
                     "CSV export",
                     "Widget & UI Perks",
-                    "Support the developer for future improvements!"
+                    "Dark mode support",
+                    "Support ongoing updates & new features"
                 ])
 
                 // Plan options (no single Start button)

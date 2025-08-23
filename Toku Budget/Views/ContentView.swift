@@ -8,7 +8,6 @@
 import SwiftUI
 import CoreData
 
-// MARK: - Local sidebar enum
 private enum Section: Hashable {
     case overview, transactions, subscriptions, budgets, bills, stats, trends, coach
 }
@@ -24,7 +23,7 @@ extension EnvironmentValues {
     }
 }
 
-// MARK: - Savings Goal change ping (so other views can refresh if they listen)
+// MARK: - Savings Goal change ping
 extension Notification.Name {
     static let savingsGoalUpdated = Notification.Name("SavingsGoalUpdated")
 }
@@ -41,26 +40,24 @@ struct ContentView: View {
     @State private var selection: Section? = .overview
     @State private var rangeMode: DateRangeMode = .month
     @State private var showGoalSheet = false
-    @State private var showConnect = false
+    @State private var showSettings = false           // ⬅️ controls the sheet
+    @StateObject private var coachChat = ChatVM()
 
     private var window: DateWindow { DateWindow.make(for: rangeMode) }
 
     init() {}
 
-    // Map SuggestionAction → local Section
     private func handleSuggestionAction(_ action: SuggestionAction) {
         switch action {
-        case .openBudgets, .setBudget:
-            selection = .budgets
-        case .openSubscriptions:
-            selection = .subscriptions
-        case .openTrends:
-            selection = .trends
+        case .openBudgets, .setBudget: selection = .budgets
+        case .openSubscriptions:       selection = .subscriptions
+        case .openTrends:              selection = .trends
         }
     }
 
     var body: some View {
         NavigationSplitView {
+            // SIDEBAR
             List(selection: $selection) {
                 Label("Overview", systemImage: "rectangle.grid.2x2").tag(Section.overview)
                 Label("Transactions", systemImage: "list.bullet.rectangle").tag(Section.transactions)
@@ -74,9 +71,18 @@ struct ContentView: View {
             .listStyle(.sidebar)
             .navigationTitle("Toku Budget")
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 300)
+
+            // ⬇️ Gear button pinned inside the sidebar, bottom-right
+            .overlay(alignment: .bottomTrailing) {
+                SidebarSettingsButton { showSettings = true }
+                    .padding(12)
+            }
+
         } detail: {
+            // DETAIL
             ZStack {
                 Theme.bg(scheme).ignoresSafeArea()
+
                 switch selection {
                 case .overview:
                     OverviewView(window: window, mode: rangeMode)
@@ -98,23 +104,16 @@ struct ContentView: View {
                     BudgetView()
                         .environment(\.suggestionNavigator, handleSuggestionAction)
 
-                case .some(.stats):
+                case .stats:
                     StatsView(window: window)
                         .environment(\.suggestionNavigator, handleSuggestionAction)
 
-                case .some(.trends):
+                case .trends:
                     TrendsView(window: window)
                         .environment(\.suggestionNavigator, handleSuggestionAction)
 
-                case .some(.coach):
-                    if let key = OpenAIKey.defaultProvider() {
-                        ChatTipsView(window: window)
-                            .environment(\.tipsChatService, OpenAITipsService(apiKey: key))
-                    } else {
-                        ChatTipsView(window: window)
-                            .environment(\.tipsChatService, LocalRuleBasedTipsService())
-                    }
-
+                case .coach:
+                    ChatTipsView(window: window).environmentObject(coachChat)
 
                 case .none:
                     Text("Select a section")
@@ -129,44 +128,35 @@ struct ContentView: View {
                 AppearancePicker()
                 Spacer(minLength: 0)
             }
-
-            // Savings goal sheet
             ToolbarItem(placement: .automatic) {
                 Button { showGoalSheet = true } label: {
-                    Label("Savings Goal", systemImage: "scope") // target-like glyph
+                    Label("Savings Goal", systemImage: "scope")
                 }
-            }
-
-            // Connect OpenAI key (Keychain sheet)
-            ToolbarItem(placement: .automatic) {
-                Button { showConnect = true } label: {
-                    Label("Connect OpenAI", systemImage: "bolt.horizontal")
-                }
-                .help("Store your OpenAI API key securely to unlock AI coaching")
             }
 
             #if os(macOS)
-            // Import/Export menu
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("Import CSV…") { ImportCoordinator.presentImporter(moc) }
                     Button("Export CSV…") { ExportCoordinator.presentExporter(moc) }
+                    Divider()
+                    Button("Settings") { showSettings = true }
+                        .keyboardShortcut(",", modifiers: .command)
                 } label: {
                     Label("Import/Export", systemImage: "arrow.up.arrow.down.square")
                 }
             }
             #endif
         }
-        .sheet(isPresented: $showGoalSheet) {
-            SavingsGoalSheet()
-        }
-        .sheet(isPresented: $showConnect) {
-            ConnectOpenAIView()
+        .sheet(isPresented: $showGoalSheet) { SavingsGoalSheet() }
+        .sheet(isPresented: $showSettings) {        // ⬅️ settings sheet
+            NavigationStack { SettingsRootView() }
+                .frame(minWidth: 720, minHeight: 560)
         }
         .onChange(of: selection) { print("Sidebar selection ->", String(describing: $0)) }
     }
 
-    // Dev-only seeding so UI has something to show
+    // Seed sample categories
     private func seedIfNeeded() throws {
         if categories.isEmpty {
             ["Groceries","Transport","Entertainment","Utilities","Rent","Health","Shopping","Other"]
@@ -181,7 +171,27 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Toolbar bits
+// MARK: - Sidebar gear
+
+private struct SidebarSettingsButton: View {
+    var action: () -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .padding(10)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Theme.cardBorder(scheme)))
+        }
+        .buttonStyle(.plain)
+        .shadow(radius: 3)
+        .accessibilityLabel("Settings")
+    }
+}
+
+// MARK: - Date range picker, chips, etc. (unchanged)
 
 struct DateRangePicker: View {
     @Binding var mode: DateRangeMode
@@ -218,8 +228,7 @@ struct Chip: View {
                 .font(.callout)
                 .padding(.vertical, 6)
                 .padding(.horizontal, 10)
-                .background(selected ? Color.accentColor.opacity(0.12)
-                                     : Theme.card(scheme))
+                .background(selected ? Color.accentColor.opacity(0.12) : Theme.card(scheme))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(Theme.cardBorder(scheme))
@@ -256,7 +265,6 @@ struct DateWindow: Equatable {
             let start = cal.date(from: cal.dateComponents([.year, .month], from: anchor))!
             let end   = cal.date(byAdding: .month, value: 1, to: start)!
             return .init(start: start, end: end)
-
         case .quarter:
             let comps = cal.dateComponents([.year, .month], from: anchor)
             let month = comps.month ?? 1
@@ -267,7 +275,6 @@ struct DateWindow: Equatable {
             let start = cal.date(from: s)!
             let end   = cal.date(byAdding: .month, value: 3, to: start)!
             return .init(start: start, end: end)
-
         case .year:
             let comps = cal.dateComponents([.year], from: anchor)
             let start = cal.date(from: comps)!
@@ -277,7 +284,7 @@ struct DateWindow: Equatable {
     }
 }
 
-// MARK: - Savings Goal Sheet
+// MARK: - Savings Goal Sheet (unchanged)
 
 private struct SavingsGoalSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -292,7 +299,7 @@ private struct SavingsGoalSheet: View {
                 TextField("Amount to save", value: $amount, format: .number)
                 DatePicker("Target date", selection: $targetDate, displayedComponents: .date)
             } footer: {
-                Text("Suggestions will use this to propose monthly/weekly saving targets and category trims.")
+                Text("Suggestions will use this to propose monthly/weekly targets and trims.")
             }
 
             if hasExisting {
@@ -323,8 +330,7 @@ private struct SavingsGoalSheet: View {
     }
 
     private func saveGoal() {
-        let store = SavingsGoalStore()
-        store.write(SavingsGoal(amount: amount, targetDate: targetDate))
+        SavingsGoalStore().write(SavingsGoal(amount: amount, targetDate: targetDate))
         NotificationCenter.default.post(name: .savingsGoalUpdated, object: nil)
         dismiss()
     }
@@ -336,6 +342,9 @@ private struct SavingsGoalSheet: View {
         dismiss()
     }
 }
+
+
+
 
 
 

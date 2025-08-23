@@ -30,9 +30,10 @@ struct Toku_BudgetApp: App {
                 RootView()
                     .environment(\.managedObjectContext, persistence.container.viewContext)
 //                PaywallView()
+//                SettingsRootView()
             }
             .commands {
-                ImportExportCommands()   // ← adds File ▸ Import/Export menu items
+                ImportExportCommands()
             }
         }
     }
