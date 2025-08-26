@@ -8,20 +8,27 @@
 import SwiftUI
 
 struct RootView: View {
-    @AppStorage("appAppearance") private var raw = AppAppearance.system.rawValue
+    // Default to Light now that "system" no longer exists
+    @AppStorage("appAppearance") private var raw = AppAppearance.light.rawValue
+
     @Environment(\.managedObjectContext) private var moc
-       @AppStorage(BillReminderDefaults.enabledKey)  private var remindersEnabled = true
-       @AppStorage(BillReminderDefaults.leadDaysKey) private var leadDays = BillReminderDefaults.defaultLead
-    private var appearance: AppAppearance { AppAppearance(rawValue: raw) ?? .system }
+    @AppStorage(BillReminderDefaults.enabledKey)  private var remindersEnabled = true
+    @AppStorage(BillReminderDefaults.leadDaysKey) private var leadDays = BillReminderDefaults.defaultLead
+
+    // Coerce any legacy/unknown value (e.g. "system") to .light
+    private var appearance: AppAppearance { AppAppearance(rawValue: raw) ?? .light }
 
     var body: some View {
         ContentView()
-                   .preferredColorScheme(appearance.colorScheme)
-                   .task {
-                       guard remindersEnabled else { return }
-                       BillReminder.shared.requestAuthorization()
-                       BillReminder.shared.rescheduleAll(context: moc, leadDays: leadDays)
-                   }
-            .preferredColorScheme(appearance.colorScheme) 
+            .preferredColorScheme(appearance.colorScheme)
+            .task {
+                // One-time migration if a legacy "system" was stored
+                if raw == "system" { raw = AppAppearance.light.rawValue }
+
+                guard remindersEnabled else { return }
+                BillReminder.shared.requestAuthorization()
+                BillReminder.shared.rescheduleAll(context: moc, leadDays: leadDays)
+            }
     }
 }
+

@@ -14,11 +14,14 @@ import Charts
 struct BudgetView: View {
     @Environment(\.managedObjectContext) private var moc
     @Environment(\.colorScheme) private var scheme
+    @EnvironmentObject private var premium: PremiumStore
+    @StateObject private var tour = CoachTour(storageKey: "tour.budgets")
 
     @FetchRequest private var budgets: FetchedResults<Budget>
     @FetchRequest private var monthTx: FetchedResults<Transaction>
 
     @State private var showNew = false
+    @State private var showPaywall = false
     @State private var selection = Set<NSManagedObjectID>()
     @State private var confirmDelete = false
 
@@ -31,11 +34,8 @@ struct BudgetView: View {
         bReq.predicate = NSPredicate(format: "periodStart == %@", start as NSDate)
         bReq.sortDescriptors = [
             NSSortDescriptor(key: "periodStart", ascending: true),
-            NSSortDescriptor(key: "uuid",        ascending: true) // tie-breaker
+            NSSortDescriptor(key: "uuid",        ascending: true)
         ]
-        // DEBUG: prove what keys are being used at runtime
-        print("Budget sort keys:", bReq.sortDescriptors?.compactMap { $0.key } ?? [])
-
         _budgets = FetchRequest(fetchRequest: bReq, animation: .default)
 
         let tReq: NSFetchRequest<Transaction> = Transaction.fetchRequest()
@@ -44,7 +44,12 @@ struct BudgetView: View {
         _monthTx = FetchRequest(fetchRequest: tReq, animation: .default)
     }
 
+    // MARK: - Free/Premium limit
 
+    private let freeLimit = 5
+    private var budgetCount: Int { budgets.count }                 // current month only
+    private var atLimit: Bool { !premium.isPremium && budgetCount >= freeLimit }
+    private var remaining: Int { max(0, freeLimit - budgetCount) }
 
     private var spentByCategory: [NSManagedObjectID: Decimal] {
         var dict: [NSManagedObjectID: Decimal] = [:]
@@ -57,61 +62,117 @@ struct BudgetView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Budgets").font(.title2).bold()
-                Spacer()
-                Button { showNew = true } label: { Label("New", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent)
-            }
+        ZStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                header
 
-            if budgets.isEmpty {
-                VStack(spacing: 8) {
-                    Text("No budgets for this month").foregroundStyle(.secondary)
-                    Button("Create a Budget") { showNew = true }
-                }
-                .frame(maxWidth: .infinity, minHeight: 200)
-                .card()
-            } else {
-                List(selection: $selection) {
-                    ForEach(budgets) { b in
-                        let spent = b.category.flatMap { spentByCategory[$0.objectID] } ?? 0
-                        BudgetRow(budget: b, spent: spent)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    selection = [b.objectID]
-                                    confirmDelete = true
-                                } label: {
-                                    Label("Delete Budget", systemImage: "trash")
+                if budgets.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("No budgets for this month").foregroundStyle(.secondary)
+                        Button("Create a Budget") { handleNewTapped() }
+                            .disabled(atLimit)
+                            .coachAnchor(.budgetsNew)      // <- coach target when empty
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                    .card()
+                } else {
+                    List(selection: $selection) {
+                        ForEach(budgets) { b in
+                            let spent = b.category.flatMap { spentByCategory[$0.objectID] } ?? 0
+                            BudgetRow(budget: b, spent: spent)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        selection = [b.objectID]
+                                        confirmDelete = true
+                                    } label: {
+                                        Label("Delete Budget", systemImage: "trash")
+                                    }
+                                }
+                        }
+                        .onDelete { idx in
+                            idx.map { budgets[$0] }.forEach { moc.delete($0) }
+                            try? moc.save()
+                        }
+                    }
+                    .listStyle(.inset)
+                    .onDeleteCommand { if !selection.isEmpty { confirmDelete = true } }
+                    .alert("Delete \(selection.count) budget\(selection.count == 1 ? "" : "s")?",
+                           isPresented: $confirmDelete) {
+                        Button("Delete", role: .destructive) {
+                            for id in selection {
+                                if let b = try? moc.existingObject(with: id) as? Budget {
+                                    moc.delete(b)
                                 }
                             }
-                    }
-                    .onDelete { idx in
-                        idx.map { budgets[$0] }.forEach { moc.delete($0) }
-                        try? moc.save()
-                    }
-                }
-                .listStyle(.inset)
-                .onDeleteCommand { if !selection.isEmpty { confirmDelete = true } }
-                .alert("Delete \(selection.count) budget\(selection.count == 1 ? "" : "s")?",
-                       isPresented: $confirmDelete) {
-                    Button("Delete", role: .destructive) {
-                        for id in selection {
-                            if let b = try? moc.existingObject(with: id) as? Budget {
-                                moc.delete(b)
-                            }
+                            try? moc.save()
+                            selection.removeAll()
                         }
-                        try? moc.save()
-                        selection.removeAll()
+                        Button("Cancel", role: .cancel) { }
+                    } message: {
+                        Text("This won’t delete any transactions or categories.")
                     }
-                    Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("This won’t delete any transactions or categories.")
+                    .coachAnchor(.budgetsList)          // <- coach target on list/progress
                 }
             }
+            .padding(16)
+
+            if atLimit {
+                LimitBanner(
+                    title: "Free limit reached",
+                    message: "You’ve created \(budgetCount) budgets this month. Upgrade to Premium for unlimited.",
+                    actionTitle: "Upgrade"
+                ) { showPaywall = true }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+            }
         }
-        .padding(16)
+        .coachOverlay(tour)
+        .onAppear {
+            tour.startOnce([
+                CoachStep(
+                    key: .budgetsNew,
+                    title: "Create a monthly budget",
+                    body: "Press **New** to choose a category and set a monthly limit."
+                ),
+                CoachStep(
+                    key: .budgetsList,
+                    title: "Track progress",
+                    body: "Bars show **spent vs left**. Red means you’ve exceeded the limit."
+                )
+            ])
+        }
         .sheet(isPresented: $showNew) { NewBudgetSheet() }
+        .sheet(isPresented: $showPaywall) {
+            NavigationStack { PaywallView() }
+                .frame(minWidth: 540, minHeight: 680)
+        }
+    }
+
+    // MARK: - Header & actions
+
+    private var header: some View {
+        HStack {
+            Text("Budgets").font(.title2).bold()
+            Spacer()
+            if !premium.isPremium {
+                Text("\(min(budgetCount, freeLimit))/\(freeLimit)")
+                    .foregroundStyle(remaining == 0 ? .red : .secondary)
+                    .monospacedDigit()
+                    .help("Free plan limit for this month")
+            }
+            Button { handleNewTapped() } label: { Label("New", systemImage: "plus") }
+                .buttonStyle(.borderedProminent)
+                .disabled(atLimit)
+                .coachAnchor(.budgetsNew)     // coach target when list is not empty
+        }
+    }
+
+    private func handleNewTapped() {
+        if premium.isPremium || budgetCount < freeLimit {
+            showNew = true
+        } else {
+            showPaywall = true
+        }
     }
 }
 
@@ -259,4 +320,35 @@ func uniqueCategories(_ list: [Category]) -> [Category] {
     // Safe sort by display name
     return out.sorted { ($0.name ?? "") < ($1.name ?? "") }
 }
+
+// MARK: - Upgrade banner (local)
+
+private struct LimitBanner: View {
+    let title: String
+    let message: String
+    let actionTitle: String
+    var action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "lock.fill").imageScale(.medium)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button(actionTitle, action: action).buttonStyle(.borderedProminent)
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12))
+        )
+    }
+}
+
+
+
+
 

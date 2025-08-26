@@ -11,23 +11,19 @@ import StoreKit
 struct PaywallView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
+    @EnvironmentObject private var store: PremiumStore   // ✅ real env object
 
     @State private var products: [Product] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var isPurchasing = false
-    // Remove backgroundGradient and add this:
-    private var pageBackground: Color { Color.white.opacity(0.08) }
+    @State private var purchasingID: String?
 
-    // Replace with your real product IDs
-    private let productIDs: [String] = [
-        "com.tokubudget.premium.yearly",
-        "com.tokubudget.premium.monthly"
-    ]
+    // Use your store’s IDs
+    private var productIDs: [String] { Array(PremiumStore.ids) }   // ✅ Set → [String]
 
-    // Background kept simple for compiler
     private var backgroundGradient: LinearGradient {
-        let colors: [Color] = (scheme == .dark)
+        let colors: [Color] = scheme == .dark
         ? [Color.black, Color.black.opacity(0.96)]
         : [Color(white: 0.97), Color(white: 0.99)]
         return LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
@@ -36,7 +32,6 @@ struct PaywallView: View {
     var body: some View {
         ZStack {
             backgroundGradient.ignoresSafeArea()
-
             VStack(spacing: 22) {
                 // Close
                 HStack {
@@ -52,7 +47,6 @@ struct PaywallView: View {
                 }
                 .padding(.top, 6)
 
-                // Logo only (no colored circle behind)
                 LogoBadge()
 
                 // Headline + subhead
@@ -60,7 +54,6 @@ struct PaywallView: View {
                     Text("Unlock Premium Benefits")
                         .font(.system(size: 28, weight: .bold, design: .rounded))
                         .multilineTextAlignment(.center)
-
                     Text("Achieve your budgeting goals without breaking the bank.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -69,35 +62,43 @@ struct PaywallView: View {
                 }
                 .padding(.top, 2)
 
-                // Checklist panel
                 FeaturePanel(features: [
-                    "Smart AI assistant to help you manage your budget",
+                    "AI-powered budget assistant",
                     "Personalized money-saving tips",
                     "Track unlimited transactions with full history",
                     "Detailed charts and insights into your spending",
-                    "CSV export",
-                    "Widget & UI Perks",
-                    "Dark mode support",
+                    "Export your data (CSV)",
+                    "Exclusive themes & accent colors",
                     "Support ongoing updates & new features"
                 ])
 
-                // Plan options (no single Start button)
+                // Plans
                 Group {
                     if isLoading {
                         ProgressView("Loading plans…").padding(.top, 8)
-                    } else if let error = errorMessage {
-                        Text(error).foregroundStyle(.red)
+                    } else if let errorMessage {
+                        Text(errorMessage).foregroundStyle(.red)
                     } else if products.isEmpty {
                         Text("No plans available right now.")
                             .foregroundStyle(.secondary)
                     } else {
                         VStack(spacing: 12) {
                             ForEach(sortedProducts(products), id: \.id) { product in
-                                PlanOption(product: product,
-                                           isBest: isYearly(product))
-                                .onTapGesture {
+                                Button {
                                     Task { await purchase(product) }
+                                } label: {
+                                    ZStack(alignment: .trailing) {
+                                        PlanOption(
+                                            product: product,
+                                            isBest: isYearly(product)
+                                        )
+                                        if isPurchasing && purchasingID == product.id {
+                                            ProgressView()
+                                                .padding(.trailing, 12)
+                                        }
+                                    }
                                 }
+                                .buttonStyle(.plain)
                                 .disabled(isPurchasing)
                             }
                         }
@@ -139,21 +140,32 @@ struct PaywallView: View {
     }
 
     private func restorePurchases() {
-        Task { try? await AppStore.sync() }
+        Task {
+            do { try await AppStore.sync() }
+            catch { errorMessage = "Restore failed: \(error.localizedDescription)" }
+            await store.refreshEntitlements()      // ✅ correct API
+        }
     }
 
     @MainActor
     private func purchase(_ product: Product) async {
         guard !isPurchasing else { return }
         isPurchasing = true
-        defer { isPurchasing = false }
+        purchasingID = product.id
+        defer { isPurchasing = false; purchasingID = nil }
 
         do {
             let result = try await product.purchase()
             switch result {
-            case .success:
-                // TODO: verify transaction & unlock features
-                dismiss()
+            case .success(let verification):
+                switch verification {
+                case .verified(let transaction):
+                    await transaction.finish()
+                    await store.refreshEntitlements()    // ✅ correct API
+                    dismiss()
+                case .unverified(_, let err):
+                    errorMessage = "Purchase could not be verified: \(err.localizedDescription)"
+                }
             case .userCancelled, .pending:
                 break
             @unknown default:
@@ -200,7 +212,6 @@ private func pricePerPeriod(_ product: Product) -> String {
 
 // MARK: - Subviews
 
-// Logo only—no background circle
 private struct LogoBadge: View {
     var body: some View {
         Image("Logo")
@@ -212,48 +223,30 @@ private struct LogoBadge: View {
     }
 }
 
-// Feature list (type-checker friendly)
 private struct FeaturePanel: View {
     let features: [String]
-    @Environment(\.colorScheme) private var scheme
-
-    private var fillColor: Color { Color.white.opacity(0.08) }          // ⬅️ rgba(255,255,255,0.08)
-    private var backgroundShape: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fillColor)
-    }
-    private var borderShape: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(Color.white.opacity(0.12)) // subtle border to match the look
-    }
+    private var fillColor: Color { Color.white.opacity(0.08) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(features, id: \.self) { text in
-                FeatureRow(text: text)
-            }
+            ForEach(features, id: \.self) { FeatureRow(text: $0) }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(backgroundShape)
-        .overlay(borderShape)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fillColor))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.12)))
         .padding(.horizontal, 4)
     }
 }
 
-
 private struct FeatureRow: View {
     let text: String
-
-    private var icon: some View {
-        Image(systemName: "checkmark.circle.fill")
-            .font(.system(size: 18, weight: .semibold))
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(Color.white, Color.accentColor)
-    }
-
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            icon
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Color.white, Color.accentColor)
             Text(text)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
@@ -261,15 +254,10 @@ private struct FeatureRow: View {
     }
 }
 
-// A plan option styled as a large, tappable row
-
-// MARK: - PlanOption (refactored)
-
 private struct PlanOption: View {
     let product: Product
     let isBest: Bool
 
-    // Keep computations out of the body
     private var titleText: String { isYearly(product) ? "Premium Yearly" : "Premium Monthly" }
     private var subtitleText: String { product.displayName }
     private var priceText: String { pricePerPeriod(product) }
@@ -277,28 +265,19 @@ private struct PlanOption: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                TitleRow(title: titleText, isBest: isBest)
-                Subtitle(text: subtitleText)
+                HStack(spacing: 8) {
+                    Text(titleText).font(.headline)
+                    if isBest { BestBadge() }
+                }
+                Text(subtitleText).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            PriceTag(text: priceText)
+            Text(priceText).font(.title3).bold().monospacedDigit()
         }
         .padding(14)
-        .modifier(PanelStyle())     // background + border moved to a simple modifier
-        .contentShape(Rectangle())  // keeps the whole row tappable if you add onTapGesture
-    }
-}
-
-// MARK: - Small pieces
-
-private struct TitleRow: View {
-    let title: String
-    let isBest: Bool
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(title).font(.headline)
-            if isBest { BestBadge() }
-        }
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.08)))
+        .contentShape(Rectangle())
     }
 }
 
@@ -308,52 +287,15 @@ private struct BestBadge: View {
             .font(.caption2)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(
-                Capsule().fill(Color.accentColor.opacity(0.15))
-            )
-            .foregroundColor(Color.accentColor) // ✅ was .foregroundStyle(.accentColor)
-            // Alternatively:
-            // .foregroundStyle(Color.accentColor)
-            // or:
-            // .foregroundStyle(.tint).tint(Color.accentColor)
+            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+            .foregroundColor(Color.accentColor)
     }
 }
 
 
-private struct Subtitle: View {
-    let text: String
-    var body: some View {
-        Text(text)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-    }
-}
 
-private struct PriceTag: View {
-    let text: String
-    var body: some View {
-        Text(text)
-            .font(.title3)
-            .bold()
-            .monospacedDigit()
-    }
-}
 
-private struct PanelStyle: ViewModifier {
-    @Environment(\.colorScheme) private var scheme
-    private var bg: Color { scheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05) }
 
-    func body(content: Content) -> some View {
-        content
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(bg)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.08))
-            )
-    }
-}
 
 
 

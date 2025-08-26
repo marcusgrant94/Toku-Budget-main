@@ -533,9 +533,12 @@ private struct ChatBubble: View {
     }
 }
 
+// MARK: - CHAT VIEW (with 2-prompt paywall gate)
 struct ChatTipsView: View {
     let window: DateWindow
+
     @EnvironmentObject private var vm: ChatVM
+    @EnvironmentObject private var premium: PremiumStore          // ⬅️ premium store
     @Environment(\.managedObjectContext) private var moc
     @Environment(\.tipsChatService) private var chatService
 
@@ -545,6 +548,12 @@ struct ChatTipsView: View {
 
     @State private var draft = ""
     @State private var isThinking = false
+    @State private var showPaywall = false                         // ⬅️ gate sheet
+
+    // Count of free prompts used; reset by PremiumStore when upgrading
+    @AppStorage(PremiumStore.coachCounterKey)
+    private var usedCoachPrompts: Int = 0
+    private let freeCoachQuota = 2
 
     init(window: DateWindow) {
         self.window = window
@@ -591,7 +600,7 @@ struct ChatTipsView: View {
         }
         .onAppear {
             if vm.messages.isEmpty {
-                vm.appendSystem("Ask about saving money, budgets, or subscriptions. I’ll use your data for this period.")
+                vm.appendSystem("Hello! Im your personal financial assistant. Ask me about saving money, budgets, subscriptions, or money saving tips. I’ll use your data for this period.")
             }
         }
         .task(id: vm.pendingUserQuery) {
@@ -624,6 +633,7 @@ struct ChatTipsView: View {
                     do {
                         let reply = try await chatService.reply(to: merged, context: ctx)
                         vm.appendAssistant(reply)
+                        if !premium.isPremium { usedCoachPrompts += 1 }    // ⬅️ count only when model is called
                     } catch {
                         print("Tips service error:", error)
                         vm.appendAssistant("Tips are unavailable right now.")
@@ -638,10 +648,15 @@ struct ChatTipsView: View {
             do {
                 let reply = try await chatService.reply(to: q, context: ctx)
                 vm.appendAssistant(reply)
+                if !premium.isPremium { usedCoachPrompts += 1 }        // ⬅️ count only on real model calls
             } catch {
                 print("Tips service error:", error)
                 vm.appendAssistant("Tips are unavailable right now.")
             }
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+                .environmentObject(premium)
         }
     }
 
@@ -656,21 +671,31 @@ struct ChatTipsView: View {
     }
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            TextField("Ask for tips (e.g., How do I save $200 this month?)",
-                      text: $draft, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(send)
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Ask for tips (e.g., How do I save $200 this month?)",
+                          text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(send)
 
-            Button(action: send) {
-                if isThinking {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "paperplane.fill")
+                Button(action: send) {
+                    if isThinking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(isThinking || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(isThinking || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            if !premium.isPremium {
+                let left = max(0, freeCoachQuota - usedCoachPrompts)
+                Text("Free prompts left: \(left) of \(freeCoachQuota)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(12)
     }
@@ -678,6 +703,13 @@ struct ChatTipsView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isThinking, vm.pendingUserQuery == nil, !text.isEmpty else { return }
+
+        // ⬅️ GATE: only 2 prompts for non-premium
+        if !premium.isPremium && usedCoachPrompts >= freeCoachQuota {
+            showPaywall = true
+            return
+        }
+
         vm.appendUser(text)
         vm.pendingUserQuery = text
         draft = ""
@@ -743,6 +775,7 @@ struct ChatTipsView: View {
         return nil
     }
 }
+
 
 
 

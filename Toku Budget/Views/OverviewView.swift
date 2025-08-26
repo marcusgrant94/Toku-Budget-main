@@ -8,12 +8,21 @@
 import SwiftUI
 import CoreData
 import Charts
+import os.log
 
 struct OverviewView: View {
     let window: DateWindow
     let mode: DateRangeMode
+
     @Environment(\.managedObjectContext) private var moc
+    @EnvironmentObject private var premium: PremiumStore
     @StateObject private var cloudUser = CloudUser()
+
+    // Sheet
+    @State private var selectedTx: Transaction?
+
+    // 🔵 Onboarding coach for Overview
+    @StateObject private var tour = CoachTour(storageKey: "tour.overview")
 
     @FetchRequest private var monthTx: FetchedResults<Transaction>
     @FetchRequest private var prevMonthTx: FetchedResults<Transaction>
@@ -109,36 +118,50 @@ struct OverviewView: View {
                 Text("Welcome, \(cloudUser.displayName)")
                     .font(.system(size: 28, weight: .bold))
 
+                // Top cards row
                 HStack(alignment: .top, spacing: Theme.spacing) {
                     NetBalanceCard(amount: net, pctChange: pctChangeVsLast, spark: netSpark)
                         .frame(maxWidth: .infinity)
 
-                    UpcomingBillsCard().frame(maxWidth: .infinity)
+                    UpcomingBillsCard()
+                        .frame(maxWidth: .infinity)
+                        .coachAnchor(.overviewBills)
 
                     CategoryBreakdownChart(txs: Array(monthTx))
                         .frame(width: 280)
                         .card()
                 }
 
+                // Middle row: Recent + side column (Budgets + SpendBars)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .top, spacing: Theme.spacing) {
-                        RecentTable()
-                            .frame(maxWidth: .infinity)
-                            .card()
+                        RecentTable { tx in
+                            selectedTx = tx
+                        }
+                        .frame(maxWidth: .infinity)
+                        .card()
+                        .coachAnchor(.overviewRecent)
 
                         VStack(spacing: Theme.spacing) {
                             BudgetsMiniCard()
                                 .card()
+                                .coachAnchor(.overviewBudgets)
+
                             SpendBars(txs: Array(monthTx), yMax: spendYMaxFromBudgets)
                                 .card()
+                                .coachAnchor(.overviewSpendBars)
                         }
                         .frame(width: 320)
                     }
                 }
 
-                // 🔵 AI-only tips card (replaces old SuggestionsCard)
-                AITipsCard(window: window, viewID: "overview")
-                    .card()
+                // AI tips (paywalled)
+                PremiumLockedCard(title: "Upgrade to Premium",
+                                  subtitle: "AI Powered Personal financial tips") {
+                    AITipsCard(window: window, viewID: "overview")
+                        .card()
+                        .coachAnchor(.overviewTips)
+                }
             }
             .padding(20)
         }
@@ -152,12 +175,69 @@ struct OverviewView: View {
             Text("This will permanently remove all transactions. This cannot be undone.")
         }
         .toolbar {
-            ToolbarItem(placement: .automatic) {
+            ToolbarItemGroup(placement: .automatic) {
+                // Replay the tour
+                Button {
+                    tour.show(overviewSteps)
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .help("Show quick tips")
+
                 Button(role: .destructive) { confirmDeleteAll = true } label: {
                     Label("Delete All", systemImage: "trash")
                 }
+                .coachAnchor(.overviewDeleteAll)
             }
         }
+        // Attach the overlay
+        .coachOverlay(tour)
+        // First-time tour
+        .onAppear {
+            tour.startOnce(overviewSteps)
+        }
+        // 🔹 Present detail sheet when a row is chosen
+        .sheet(item: $selectedTx) { tx in
+            TransactionDetailSheet(tx: tx)
+                .frame(minWidth: 520, minHeight: 420)
+        }
+    }
+
+    // MARK: - Coach steps for Overview
+
+    private var overviewSteps: [CoachStep] {
+        [
+            .init(
+                key: .overviewRecent,
+                title: "Your recent activity",
+                body: "Double-click any row to edit. Import transactions from the Transactions screen."
+            ),
+            .init(
+                key: .overviewBudgets,
+                title: "Budgets at a glance",
+                body: "Set monthly limits in Budgets to keep categories on track."
+            ),
+            .init(
+                key: .overviewSpendBars,
+                title: "Daily spending",
+                body: "See which days spike. Explore deeper trends in Trends/Stats."
+            ),
+            .init(
+                key: .overviewBills,
+                title: "Upcoming bills",
+                body: "Track due dates and amounts. Mark bills paid to roll them forward."
+            ),
+            .init(
+                key: .overviewTips,
+                title: "AI Coach",
+                body: "Personalized tips based on your activity. Subscribe to Premium to unlock."
+            ),
+            .init(
+                key: .overviewDeleteAll,
+                title: "Delete All",
+                body: "Deletes all transactions. Use with care."
+            )
+        ]
     }
 }
 
@@ -179,7 +259,7 @@ private extension OverviewView {
     }
 }
 
-// MARK: - Cards (same as before)
+// MARK: - Cards (unchanged below)
 
 struct NetBalanceCard: View {
     let amount: Decimal
@@ -225,8 +305,6 @@ struct NetBalanceCard: View {
                 } else {
                     Text("").hidden()
                 }
-//                Spacer()
-//                Button("Pay") {}
             }
             .font(.callout)
         }
@@ -234,22 +312,30 @@ struct NetBalanceCard: View {
     }
 }
 
+
+
 struct UpcomingBillsCard: View {
     @Environment(\.managedObjectContext) private var moc
-    @FetchRequest private var upcoming: FetchedResults<Subscription>
+
+    // Fetch everything that has a nextBillingDate; sort earliest first.
+    @FetchRequest private var withDates: FetchedResults<Subscription>
+
+    private let log = Logger(subsystem: "TokuBudget", category: "UpcomingBillsCard")
 
     init() {
-        let today = Calendar.current.startOfDay(for: Date())
         let req: NSFetchRequest<Subscription> = Subscription.fetchRequest()
-        req.predicate = NSPredicate(
-            format: "nextBillingDate != nil AND nextBillingDate >= %@",
-            today as NSDate
-        )
-        req.sortDescriptors = [
-            NSSortDescriptor(keyPath: \Subscription.nextBillingDate, ascending: true)
-        ]
-        req.fetchLimit = 3
-        _upcoming = FetchRequest(fetchRequest: req, animation: .default)
+        req.predicate = NSPredicate(format: "nextBillingDate != nil")
+        req.sortDescriptors = [NSSortDescriptor(keyPath: \Subscription.nextBillingDate, ascending: true)]
+        _withDates = FetchRequest(fetchRequest: req, animation: .default)
+    }
+
+    // Only show items due today or later, then cap to 3
+    private var upcoming: [Subscription] {
+        let startOfToday = Calendar.current.startOfDay(for: Date())
+        return withDates
+            .filter { ($0.nextBillingDate ?? .distantPast) >= startOfToday }
+            .prefix(3)
+            .map { $0 }
     }
 
     var body: some View {
@@ -263,6 +349,9 @@ struct UpcomingBillsCard: View {
             } else {
                 ForEach(upcoming, id: \.objectID) { s in
                     HStack(spacing: 12) {
+                        Circle().fill(statusColor(for: s).opacity(0.2)).frame(width: 22, height: 22)
+                            .overlay(Circle().stroke(statusColor(for: s), lineWidth: 2))
+
                         VStack(alignment: .leading, spacing: 2) {
                             Text(s.name ?? "—").font(.headline)
                             if let d = s.nextBillingDate {
@@ -271,12 +360,15 @@ struct UpcomingBillsCard: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+
                         Spacer()
+
                         let dec: Decimal = s.amount?.decimalValue ?? .zero
                         Text((dec as NSDecimalNumber).doubleValue.formatted(.currency(code: s.currencyCode ?? "USD")))
                             .monospacedDigit()
                             .font(.headline)
-                        Button("Mark as Paid") { markPaid(s) }
+
+                        Button("Mark Paid") { markPaid(s) }
                             .buttonStyle(.bordered)
                     }
                     .padding(.vertical, 4)
@@ -284,6 +376,26 @@ struct UpcomingBillsCard: View {
             }
         }
         .card()
+        .onAppear {
+            #if DEBUG
+            log.debug("withDates=\(self.withDates.count) filtered upcoming=\(self.upcoming.count)")
+            self.withDates.forEach { sub in
+                if let d = sub.nextBillingDate {
+                    log.debug("• \(sub.name ?? "—") due \(d.formatted())")
+                }
+            }
+            #endif
+        }
+        // (No widget syncing here anymore)
+    }
+
+    private func statusColor(for s: Subscription) -> Color {
+        guard let d = s.nextBillingDate else { return .secondary }
+        let today = Calendar.current.startOfDay(for: Date())
+        let due   = Calendar.current.startOfDay(for: d)
+        if due < today { return .red }
+        if let days = Calendar.current.dateComponents([.day], from: today, to: due).day, days <= 7 { return .orange }
+        return .green
     }
 
     private func markPaid(_ s: Subscription) {
@@ -295,8 +407,19 @@ struct UpcomingBillsCard: View {
             : cal.date(byAdding: .year,  value: 1, to: due)
         s.nextBillingDate = next
         try? moc.save()
+
+        #if canImport(UIKit) || canImport(AppKit)
+        if UserDefaults.standard.bool(forKey: BillReminderDefaults.enabledKey) {
+            let lead = UserDefaults.standard.integer(forKey: BillReminderDefaults.leadDaysKey)
+            BillReminder.shared.schedule(for: s, leadDays: lead)
+        }
+        #endif
+        // (No widget syncing here anymore)
     }
 }
+
+
+
 
 struct BudgetsMiniCard: View {
     @Environment(\.managedObjectContext) private var moc
@@ -391,6 +514,7 @@ struct BudgetRing: View {
 struct SpendBars: View {
     let txs: [Transaction]
     var currencyCode: String = "USD"
+    /// Optional external cap (e.g. from budgets). We'll still pad it a bit.
     var yMax: Double? = nil
 
     private var dayTotals: [(date: Date, total: Double)] {
@@ -404,30 +528,45 @@ struct SpendBars: View {
         .sorted { $0.date < $1.date }
     }
 
+    /// Make a “nice” rounded axis max (1/2/5 × 10^n) with 5–10% headroom
+    private func niceAxisMax(for value: Double) -> Double {
+        guard value > 0 else { return 100 }
+        let padded = value * 1.08
+        let exp  = floor(log10(padded))
+        let base = pow(10, exp)
+        let frac = padded / base
+        let nice: Double = (frac <= 1) ? 1 : (frac <= 2) ? 2 : (frac <= 5) ? 5 : 10
+        return nice * base
+    }
+
+    private var yUpperBound: Double {
+        let dataMax = dayTotals.map(\.total).max() ?? 0
+        let proposed = max(dataMax, yMax ?? 0)
+        return niceAxisMax(for: proposed)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Spending by Day").bold()
 
             Chart(dayTotals, id: \.date) { bin in
-                BarMark(x: .value("Date", bin.date),
-                        y: .value("Amount", bin.total))
+                BarMark(
+                    x: .value("Date", bin.date),
+                    y: .value("Amount", bin.total)
+                )
             }
             .chartXAxis {
                 AxisMarks(values: .stride(by: .day, count: 2)) { value in
                     AxisGridLine(); AxisTick()
                     if let d = value.as(Date.self) {
                         AxisValueLabel {
-                            Text(d, format: .dateTime.weekday(.narrow))
-                                .font(.caption2)
+                            Text(d, format: .dateTime.weekday(.narrow)).font(.caption2)
                         }
                     }
                 }
             }
-            .chartYScale(domain: {
-                if let cap = yMax, cap > 0 { return 0...cap }
-                let auto = (dayTotals.map { $0.total }.max() ?? 100)
-                return 0...(auto * 1.15)
-            }())
+            // ⬇️ Keep bars below the top grid line
+            .chartYScale(domain: 0...yUpperBound)
             .chartYAxis {
                 AxisMarks(position: .trailing) { value in
                     AxisGridLine(); AxisTick()
@@ -436,6 +575,9 @@ struct SpendBars: View {
                     }
                 }
             }
+            .chartPlotStyle { plot in
+                plot.padding(.top, 6)
+            }
             .chartXAxisLabel("Date", alignment: .center)
             .chartYAxisLabel("Amount (\(currencyCode))")
             .frame(height: 180)
@@ -443,27 +585,26 @@ struct SpendBars: View {
     }
 }
 
-// If you ever see ambiguity with SwiftUI.Transaction, uncomment this:
-// typealias Tx = Transaction
-
-
 typealias Tx = Transaction
 
 struct RecentTable: View {
     @Environment(\.managedObjectContext) private var moc
     @AppStorage("settings.sheets.sortKey") private var sortKey: SheetsSortKey = .dateDesc
+    @FetchRequest private var recentRaw: FetchedResults<Transaction>
 
-    @FetchRequest private var recentRaw: FetchedResults<Tx>
+    // Selection drives the highlight; Transaction.ID is the class identifier in your build
+    @State private var selection = Set<Transaction.ID>()
 
-    init() {
-        let req: NSFetchRequest<Tx> = Tx.fetchRequest()
+    var onOpen: (Transaction) -> Void = { _ in }
+
+    init(onOpen: @escaping (Transaction) -> Void = { _ in }) {
+        self.onOpen = onOpen
+        let req: NSFetchRequest<Transaction> = Transaction.fetchRequest()
         req.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-        // Remove the limit entirely if you want *all* rows
-        // req.fetchLimit = 0   // or just delete this line
         _recentRaw = FetchRequest(fetchRequest: req, animation: .default)
     }
 
-    private var recentSorted: [Tx] {
+    private var recentSorted: [Transaction] {
         var arr = Array(recentRaw)
         switch sortKey {
         case .dateDesc:   arr.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
@@ -471,7 +612,7 @@ struct RecentTable: View {
         case .amountDesc: arr.sort { ($0.amount?.doubleValue ?? 0) > ($1.amount?.doubleValue ?? 0) }
         case .amountAsc:  arr.sort { ($0.amount?.doubleValue ?? 0) < ($1.amount?.doubleValue ?? 0) }
         }
-        return arr            // ⬅️ NO prefix() here
+        return arr
     }
 
     private var recentTotal: Decimal {
@@ -486,17 +627,36 @@ struct RecentTable: View {
                 Text(activeSortLabel).font(.caption).foregroundStyle(.secondary)
             }
 
-            Table(recentSorted) {
-                TableColumn("Date") { t in Text(t.date ?? .now, style: .date) }
-                TableColumn("Category") { t in Text(t.category?.name ?? "—") }
-                TableColumn("Account") { _ in Text("Visa") }
-                TableColumn("Status")  { _ in Text("Paid").foregroundStyle(.green) }
-                TableColumn("Amount")  { t in
+            // ✅ selection binding gives the row highlight; single click opens the sheet
+            Table(recentSorted, selection: $selection) {
+                TableColumn("Date") { (t: Transaction) in
+                    Text(t.date ?? .now, style: .date)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selection = [t.id]; onOpen(t) }
+                }
+                TableColumn("Category") { (t: Transaction) in
+                    Text(t.category?.name ?? "—")
+                        .contentShape(Rectangle())
+                        .onTapGesture { selection = [t.id]; onOpen(t) }
+                }
+//                TableColumn("Account") { (t: Transaction) in
+//                    Text("Visa")
+//                        .contentShape(Rectangle())
+//                        .onTapGesture { selection = [t.id]; onOpen(t) }
+//                }
+//                TableColumn("Status")  { (t: Transaction) in
+//                    Text("Paid").foregroundStyle(.green)
+//                        .contentShape(Rectangle())
+//                        .onTapGesture { selection = [t.id]; onOpen(t) }
+//                }
+                TableColumn("Amount")  { (t: Transaction) in
                     let dec: Decimal = t.amount?.decimalValue ?? .zero
                     Text((dec as NSDecimalNumber).doubleValue.formatted(.currency(code: t.currencyCode ?? "USD")))
                         .monospacedDigit()
+                        .contentShape(Rectangle())
+                        .onTapGesture { selection = [t.id]; onOpen(t) }
                 }
-                TableColumn(" ") { t in
+                TableColumn(" ") { (t: Transaction) in
                     Button { deleteSingle(t) } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
                         .help("Delete")
@@ -524,12 +684,11 @@ struct RecentTable: View {
         }
     }
 
-    private func deleteSingle(_ t: Tx) {
+    private func deleteSingle(_ t: Transaction) {
         moc.delete(t)
         try? moc.save()
     }
 }
-
 
 struct CategoryBreakdownChart: View {
     let txs: [Transaction]
@@ -594,5 +753,7 @@ extension Date {
     var startOfMonth: Date { Calendar.current.date(from: Calendar.current.dateComponents([.year,.month], from: self))! }
     var endOfMonth: Date { Calendar.current.date(byAdding: .month, value: 1, to: startOfMonth)! }
 }
+
+
 
 

@@ -14,6 +14,8 @@ import Charts
 struct StatsView: View {
     let window: DateWindow
     @Environment(\.managedObjectContext) private var moc
+    @EnvironmentObject private var premium: PremiumStore
+
 
     private enum Layout {
         static let chartHeight: CGFloat = 400
@@ -81,8 +83,11 @@ struct StatsView: View {
                 .card()
 
                 // 🔵 AI-only tips card (uses your Worker/OpenAI path)
-                AITipsCard(window: window, viewID: "stats")
-                    .card()
+                PremiumLockedCard(title: "Upgrade to Premium",
+                                  subtitle: "Personal financial tips") {
+                    AITipsCard(window: window, viewID: "overview")
+                        .card()
+                }
             }
             .padding(16)
         }

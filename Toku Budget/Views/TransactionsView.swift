@@ -10,11 +10,18 @@ import CoreData
 
 struct TransactionsView: View {
     @Environment(\.managedObjectContext) private var moc
+    @EnvironmentObject private var premium: PremiumStore
+    @StateObject private var tour = CoachTour(storageKey: "tour.transactions")
 
+    // Window-scoped list shown in the table (set in init(window:))
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Transaction.date, ascending: false)],
         animation: .default
     ) private var txns: FetchedResults<Transaction>
+
+    // A second fetch that always counts *all* transactions (no predicate)
+    @FetchRequest(sortDescriptors: [], animation: .default)
+    private var allTxns: FetchedResults<Transaction>
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Category.name, ascending: true)],
@@ -23,7 +30,13 @@ struct TransactionsView: View {
 
     @State private var selection: Set<NSManagedObjectID> = []
     @State private var showNew = false
+    @State private var showPaywall = false
     @State private var confirmDeleteAll = false
+
+    private let freeLimit = 30
+    private var totalCount: Int { allTxns.count }
+    private var atLimit: Bool { !premium.isPremium && totalCount >= freeLimit }
+    private var remaining: Int { max(0, freeLimit - totalCount) }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -60,45 +73,107 @@ struct TransactionsView: View {
                 }
             }
 
-            Button { showNew = true } label: { Label("Add", systemImage: "plus") }
-                .buttonStyle(.borderedProminent)
-                .padding()
+            // Floating Add button (coach target)
+            Button(action: handleAddTapped) {
+                Label("Add", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .padding()
+            .disabled(atLimit)
+            .coachAnchor(.transactionsAdd)   // 👈 onboarding anchor
+
+            // 🔒 Limit banner when free limit reached
+            if atLimit {
+                LimitBanner(
+                    title: "Free limit reached",
+                    message: "You’ve saved \(totalCount) transactions. Upgrade to Premium for unlimited.",
+                    actionTitle: "Upgrade"
+                ) { showPaywall = true }
+                .padding(.bottom, 64) // sit above the Add button
+                .padding(.horizontal)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .coachOverlay(tour)   // 👈 show onboarding overlay
+        .onAppear {
+            // Show once: where to add or import
+            tour.startOnce([
+                CoachStep(
+                    key: .transactionsAdd,
+                    title: "Add or Import",
+                    body: "Click **Add** to create a transaction.\nTo bulk import, use **File → Import CSV**."
+                )
+            ])
         }
         .sheet(isPresented: $showNew) {
             NewTransactionSheetCoreData(categories: Array(cats)) { amt, kind, date, note, cat in
-                let t = Transaction(context: moc)
-                t.uuid = UUID()
-                t.date = date
-                t.amount = NSDecimalNumber(decimal: amt)
-                t.kind = (kind == .expense) ? 0 : 1
-                t.note = note.isEmpty ? nil : note
-                t.currencyCode = "USD"
-                t.category = cat
-                try? moc.save()
+                addTransaction(amount: amt, kind: kind, date: date, note: note, category: cat)
             }
+        }
+        .sheet(isPresented: $showPaywall) {
+            NavigationStack { PaywallView() }
+                .frame(minWidth: 540, minHeight: 680)
         }
         .alert("Delete ALL transactions?",
                isPresented: $confirmDeleteAll) {
-            Button("Delete", role: .destructive) {
-                deleteAllTransactions()
-                // If you prefer to delete only currently fetched ones:
-                // txns.forEach(moc.delete); try? moc.save()
-            }
+            Button("Delete", role: .destructive) { deleteAllTransactions() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will permanently remove all transactions. This cannot be undone.")
         }
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                if !premium.isPremium {
+                    Text("\(min(totalCount, freeLimit))/\(freeLimit)")
+                        .foregroundStyle(remaining == 0 ? .red : .secondary)
+                        .monospacedDigit()
+                        .help("Free plan limit")
+                }
+
                 Button(role: .destructive) {
                     confirmDeleteAll = true
                 } label: {
                     Label("Delete All", systemImage: "trash")
                 }
-                Button { showNew = true } label: { Label("New", systemImage: "plus") }
+
+                Button(action: handleAddTapped) {
+                    Label("New", systemImage: "plus")
+                }
+                .disabled(atLimit)
             }
         }
         .padding(12)
+    }
+
+    // MARK: - Actions
+
+    private func handleAddTapped() {
+        if premium.isPremium || totalCount < freeLimit {
+            showNew = true
+        } else {
+            showPaywall = true
+        }
+    }
+
+    private func addTransaction(amount: Decimal,
+                                kind: TxKind,
+                                date: Date,
+                                note: String,
+                                category: Category?) {
+        // Double-check the limit on save
+        guard premium.isPremium || totalCount < freeLimit else {
+            showPaywall = true
+            return
+        }
+        let t = Transaction(context: moc)
+        t.uuid = UUID()
+        t.date = date
+        t.amount = NSDecimalNumber(decimal: amount)
+        t.kind = (kind == .expense) ? 0 : 1
+        t.note = note.isEmpty ? nil : note
+        t.currencyCode = "USD"
+        t.category = category
+        try? moc.save()
     }
 }
 
@@ -114,6 +189,8 @@ extension TransactionsView {
         let cReq: NSFetchRequest<Category> = Category.fetchRequest()
         cReq.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
         _cats = FetchRequest(fetchRequest: cReq, animation: .default)
+
+        // _allTxns remains with its default (no predicate) to count every transaction.
     }
 }
 
@@ -135,6 +212,33 @@ private extension TransactionsView {
     }
 }
 
+// MARK: - Limit banner
+
+private struct LimitBanner: View {
+    let title: String
+    let message: String
+    let actionTitle: String
+    var action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "lock.fill").imageScale(.medium)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button(actionTitle, action: action)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12))
+        )
+    }
+}
 
 // MARK: - Add Sheet (Core Data)
 
@@ -164,7 +268,6 @@ struct NewTransactionSheetCoreData: View {
                 ForEach(uniqueCategories(categories), id: \.objectID) { c in
                     Text(c.name ?? "—").tag(Optional(c))
                 }
-
             }
             TextField("Note", text: $note)
         }
@@ -191,6 +294,8 @@ extension Decimal {
         (self as NSDecimalNumber).doubleValue.formatted(.currency(code: code))
     }
 }
+
+
 
 
 

@@ -8,6 +8,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import CoreData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Small helpers
 
@@ -44,8 +47,7 @@ private struct RowDivider: View {
     }
 }
 
-private extension View {
-    /// Adds an X close button to a sheet/nav stack.
+extension View {
     func closeToolbar(_ action: @escaping () -> Void) -> some View {
         toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -94,12 +96,14 @@ enum MacFileHelper {
 
 struct SettingsRootView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var premium: PremiumStore
+    @Environment(\.managedObjectContext) private var moc   // ⬅️ for real CSV export
 
-    // ✅ Use the same key your app already uses globally
-    @AppStorage("appAppearance") private var appAppearanceRaw: String = AppAppearance.system.rawValue
-    private var appAppearance: AppAppearance { AppAppearance(rawValue: appAppearanceRaw) ?? .system }
+    // Global appearance key (AppAppearance is defined elsewhere)
+    @AppStorage("appAppearance") private var appAppearanceRaw: String = AppAppearance.light.rawValue
+    private var appAppearance: AppAppearance { AppAppearance(rawValue: appAppearanceRaw) ?? .light }
 
-    // Appearance (extra knobs still local to Settings)
+    // Appearance
     @AppStorage("settings.appearance.accent")  private var accent: AccentChoice = .blue
     @AppStorage("settings.appearance.uiScale") private var uiScale: Double = 1.0
 
@@ -115,7 +119,8 @@ struct SettingsRootView: View {
     @State private var showSyncSheet = false
     @State private var showSortSheet = false
     @State private var showTrashSheet = false
-    @State private var showPaywall = false          // ⬅️ NEW
+    @State private var showPaywall = false
+    @State private var showAboutSheet = false   // ⬅️ NEW
 
     @State private var showCSVExporter = false
     @State private var csvDoc = CSVDocument(data: Data())
@@ -126,34 +131,43 @@ struct SettingsRootView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
 
-                // ⭐ Toku Budget Premium (tap to open paywall)
-                Button { showPaywall = true } label: {
-                    HStack {
-                        LeadingIcon(systemName: "star.fill", color: .yellow)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Toku Budget Premium").font(.headline)
-                            Text("Unlock advanced reports and automation")
-                                .font(.caption).foregroundStyle(.secondary)
+                // ⭐ Premium (only show if NOT subscribed)
+                if !premium.isPremium {
+                    Button { showPaywall = true } label: {
+                        HStack {
+                            LeadingIcon(systemName: "star.fill", color: .yellow)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Toku Budget Premium").font(.headline)
+                                Text("Unlock advanced reports and automation")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.thinMaterial))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.08)))
+                    .opacity(0.9)
                 }
-                .buttonStyle(.plain)
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.thinMaterial))
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.08)))
-                .opacity(0.9)
 
                 // Data & Maintenance
                 CardSection {
+                    // 🔒 Sync locked unless Premium
                     tappableRow(
-                        action: { showSyncSheet = true },
-                        icon: ("arrow.triangle.2.circlepath", .blue),
+                        action: {
+                            if premium.isPremium { showSyncSheet = true }
+                            else { showPaywall = true }
+                        },
+                        icon: ("arrow.triangle.2.circlepath", premium.isPremium ? .blue : .gray),
                         title: "Sync",
-                        subtitle: iCloudEnabled ? "iCloud enabled" : "iCloud off"
+                        subtitle: premium.isPremium
+                            ? (iCloudEnabled ? "iCloud enabled" : "iCloud off")
+                            : "Premium required",
+                        trailing: premium.isPremium ? nil : "Premium"
                     )
                     RowDivider()
                     tappableRow(
@@ -162,11 +176,18 @@ struct SettingsRootView: View {
                         title: "Categories"
                     )
                     RowDivider()
+
+                    // 🔒 CSV Export locked unless Premium
                     tappableRow(
-                        action: { exportCSV() },
-                        icon: ("square.and.arrow.up.on.square", .green),
-                        title: "Export"
+                        action: {
+                            if premium.isPremium { exportCSV() } else { showPaywall = true }
+                        },
+                        icon: ("square.and.arrow.up.on.square", premium.isPremium ? .green : .gray),
+                        title: "Export",
+                        subtitle: premium.isPremium ? nil : "Premium required",
+                        trailing: premium.isPremium ? nil : "Premium"
                     )
+
                     RowDivider()
                     tappableRow(
                         action: { showCSVImportSheet = true },
@@ -193,8 +214,29 @@ struct SettingsRootView: View {
                     tappableRow(
                         action: { showSortSheet = true },
                         icon: ("arrow.up.arrow.down", .teal),
-                        title: "Sort Sheets By",
+                        title: "Sort Transactions By",
                         trailing: sortKey.short
+                    )
+                }
+
+                // 📨 Support
+                CardSection {
+                    tappableRow(
+                        action: { sendFeedback() },
+                        icon: ("paperplane.fill", .blue),
+                        title: "Send Feedback"
+                    )
+                    RowDivider()
+                    tappableRow(
+                        action: { openFAQ() },
+                        icon: ("questionmark.circle.fill", .blue),
+                        title: "FAQ"
+                    )
+                    RowDivider()
+                    tappableRow(                              // ⬅️ About row
+                        action: { showAboutSheet = true },
+                        icon: ("info.circle.fill", .blue),
+                        title: "About"
                     )
                 }
             }
@@ -205,9 +247,9 @@ struct SettingsRootView: View {
         .tint(accent.color)
         .preferredColorScheme(appAppearance.colorScheme)
         .environment(\.sizeCategory, mappedSizeCategory(uiScale: uiScale))
-        .closeToolbar { dismiss() }   // X to close Settings
+        .closeToolbar { dismiss() }
 
-        // Sheets (each with its own X)
+        // Sheets
         .sheet(isPresented: $showCSVImportSheet) {
             NavigationStack {
                 CSVImportView()
@@ -219,7 +261,7 @@ struct SettingsRootView: View {
         }
         .sheet(isPresented: $showAppearanceSheet) {
             NavigationStack {
-                AppearanceSettingsView() // writes to @AppStorage("appAppearance")
+                AppearanceSettingsView()
                     .padding()
                     .closeToolbar { showAppearanceSheet = false }
             }
@@ -257,15 +299,22 @@ struct SettingsRootView: View {
             }
             .frame(minWidth: 420, minHeight: 220)
         }
-
-        // ⬇️ NEW: Paywall sheet
         .sheet(isPresented: $showPaywall) {
             NavigationStack {
-                PaywallView() // ← your existing paywall
+                PaywallView()
                     .navigationTitle("Toku Budget Premium")
                     .closeToolbar { showPaywall = false }
             }
-            .frame(minWidth: 640, minHeight: 560)   // macOS nice default; ignored on iOS
+            .frame(minWidth: 640, minHeight: 560)
+        }
+        // ⬇️ About sheet
+        .sheet(isPresented: $showAboutSheet) {
+            NavigationStack {
+                AboutView()
+                    .padding()
+                    .closeToolbar { showAboutSheet = false }
+            }
+            .frame(minWidth: 420, minHeight: 520)
         }
 
         // Exporters (iOS/iPadOS)
@@ -304,17 +353,41 @@ struct SettingsRootView: View {
         }
         .contentShape(Rectangle())
         .padding(.horizontal, 14)
-        .frame(minHeight: 56) // consistent touch/visual height
+        .frame(minHeight: 56)
     }
 
     // MARK: - Actions
 
     private func exportCSV() {
-        let data = Data("date,category,amount\n2025-08-01,Groceries,42.18\n".utf8)
         #if os(macOS)
-        MacFileHelper.save(suggested: "Transactions.csv", data: data)
+        // Use the shared macOS exporter (real data)
+        ExportCoordinator.presentExporter(moc)
         #else
-        csvDoc = CSVDocument(data: data); showCSVExporter = true
+        // Build CSV from Core Data (real data) and invoke the file exporter
+        let req: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        req.sortDescriptors = [NSSortDescriptor(key: "date", ascending: true)]
+        let txs = (try? moc.fetch(req)) ?? []
+
+        var rows: [[String]] = []
+        rows.append(["Date","Amount","Type","Currency","Category","Note"])
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
+
+        for t in txs {
+            let amt = (t.amount ?? 0).doubleValue
+            let type = (t.kind == 0) ? "Expense" : "Income"
+            rows.append([
+                df.string(from: t.date ?? .now),
+                String(format: "%.2f", amt),
+                type,
+                t.currencyCode ?? "USD",
+                t.category?.name ?? "",
+                t.note ?? ""
+            ])
+        }
+
+        let csv = makeCSV(rows)
+        csvDoc = CSVDocument(data: Data(csv.utf8))
+        showCSVExporter = true
         #endif
     }
 
@@ -327,6 +400,17 @@ struct SettingsRootView: View {
         #endif
     }
 
+    // Minimal CSV writer (escapes quotes/commas/newlines)
+    private func makeCSV(_ rows: [[String]]) -> String {
+        func escape(_ s: String) -> String {
+            if s.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" }) {
+                return "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
+            }
+            return s
+        }
+        return rows.map { $0.map(escape).joined(separator: ",") }.joined(separator: "\n")
+    }
+
     private func mappedSizeCategory(uiScale: Double) -> ContentSizeCategory {
         switch uiScale {
         case ..<0.95: return .small
@@ -336,9 +420,28 @@ struct SettingsRootView: View {
         default:      return .extraExtraLarge
         }
     }
+
+    private func sendFeedback() {
+        let email = "grantmarcus1994@gmail.com"
+        guard let url = URL(string: "mailto:\(email)") else { return }
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #elseif canImport(UIKit)
+        UIApplication.shared.open(url)
+        #endif
+    }
+
+    private func openFAQ() {
+        guard let url = URL(string: "https://marcusgrant94.github.io/toku-budget-faq/") else { return }
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #elseif canImport(UIKit)
+        UIApplication.shared.open(url)
+        #endif
+    }
 }
 
-// MARK: - Sub-screens (no PrintSettingsView anymore)
+// MARK: - Sub-screens (no PrintSettingsView)
 
 enum AccentChoice: String, CaseIterable, Identifiable {
     case blue, green, teal, orange, pink, purple, indigo, yellow
@@ -380,18 +483,36 @@ enum SheetsSortKey: String, CaseIterable, Identifiable {
 
 struct AppearanceSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var premium: PremiumStore
 
-    // ✅ Bind directly to your global key
-    @AppStorage("appAppearance") private var appAppearanceRaw: String = AppAppearance.system.rawValue
+    @AppStorage("appAppearance") private var appAppearanceRaw: String = AppAppearance.light.rawValue
     private var appearanceBinding: Binding<AppAppearance> {
         Binding(
-            get: { AppAppearance(rawValue: appAppearanceRaw) ?? .system },
+            get: { AppAppearance(rawValue: appAppearanceRaw) ?? .light },
             set: { appAppearanceRaw = $0.rawValue }
         )
     }
 
     @AppStorage("settings.appearance.accent")  private var accent: AccentChoice = .blue
     @AppStorage("settings.appearance.uiScale") private var uiScale: Double = 1.0
+
+    // Present paywall immediately from inside this sheet
+    @State private var showPaywallLocal = false
+
+    // Gate non-blue choices
+    private var accentBinding: Binding<AccentChoice> {
+        Binding(
+            get: { accent },
+            set: { newValue in
+                if !premium.isPremium && newValue != .blue {
+                    accent = .blue
+                    showPaywallLocal = true       // ⬅️ present now
+                } else {
+                    accent = newValue
+                }
+            }
+        )
+    }
 
     var body: some View {
         Form {
@@ -403,30 +524,44 @@ struct AppearanceSettingsView: View {
 
                 HStack {
                     Text("Accent Color"); Spacer()
-                    Picker("", selection: $accent) {
+                    Picker("", selection: accentBinding) {
                         ForEach(AccentChoice.allCases) { c in
-                            HStack {
+                            HStack(spacing: 8) {
                                 Circle().fill(c.color).frame(width: 12, height: 12)
                                 Text(c.rawValue.capitalized)
-                            }.tag(c)
+                                if !premium.isPremium && c != .blue {
+                                    Image(systemName: "lock.fill").foregroundStyle(.secondary)
+                                }
+                            }
+                            .tag(c)
                         }
                     }
                     .labelsHidden()
                     .frame(maxWidth: 260)
                 }
 
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("UI Scale"); Spacer()
-                        Text("\(Int(uiScale * 100))%")
-                            .foregroundStyle(.secondary).monospacedDigit()
+                if !premium.isPremium {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.fill")
+                        Text("Blue is free. Unlock more colors with Premium.")
+                        Spacer()
+                        Button("Upgrade") { showPaywallLocal = true } // ⬅️ immediate
                     }
-                    Slider(value: $uiScale, in: 0.9...1.2, step: 0.01)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 }
             } header: { Text("Appearance") }
         }
-        .preferredColorScheme((AppAppearance(rawValue: appAppearanceRaw) ?? .system).colorScheme)
+        .preferredColorScheme((AppAppearance(rawValue: appAppearanceRaw) ?? .light).colorScheme)
         .closeToolbar { dismiss() }
+        .sheet(isPresented: $showPaywallLocal) {
+            NavigationStack {
+                PaywallView()
+                    .navigationTitle("Toku Budget Premium")
+                    .closeToolbar { showPaywallLocal = false }
+            }
+            .frame(minWidth: 640, minHeight: 560)
+        }
     }
 }
 
@@ -447,25 +582,62 @@ struct CategoriesSettingsView: View {
 
 struct SyncSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var premium: PremiumStore
+
     @AppStorage("settings.sync.icloudEnabled") private var iCloudEnabled: Bool = true
     @AppStorage("settings.sync.lastRun")       private var lastSyncTimestamp: Double = 0
+
+    @State private var showPaywallLocal = false
+
     var body: some View {
-        Form {
-            Toggle("Sync with iCloud", isOn: $iCloudEnabled)
-            HStack {
-                Text("Last Sync"); Spacer()
-                Text(lastSyncTimestamp > 0
-                     ? Date(timeIntervalSince1970: lastSyncTimestamp)
-                        .formatted(date: .abbreviated, time: .shortened)
-                     : "—")
-                .foregroundStyle(.secondary)
+        Group {
+            if premium.isPremium {
+                Form {
+                    Toggle("Sync with iCloud", isOn: $iCloudEnabled)
+                    HStack {
+                        Text("Last Sync"); Spacer()
+                        Text(lastSyncTimestamp > 0
+                             ? Date(timeIntervalSince1970: lastSyncTimestamp)
+                                .formatted(date: .abbreviated, time: .shortened)
+                             : "—")
+                        .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        lastSyncTimestamp = Date().timeIntervalSince1970
+                    } label: {
+                        Label("Sync Now", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!iCloudEnabled)
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "lock.fill").font(.largeTitle)
+                    Text("Sync is a Premium feature").font(.title3).bold()
+                    Text("Upgrade to enable iCloud sync and automatic updates.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    HStack(spacing: 12) {
+                        Button("Not Now") { dismiss() }
+                            .buttonStyle(.bordered)
+                        Button("Upgrade") { showPaywallLocal = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .frame(minWidth: 420, minHeight: 220)
+                .padding()
             }
-            Button { lastSyncTimestamp = Date().timeIntervalSince1970 }
-            label: { Label("Sync Now", systemImage: "arrow.clockwise") }
-            .disabled(!iCloudEnabled)
         }
-        .padding()
+        .navigationTitle("Sync")
         .closeToolbar { dismiss() }
+        .sheet(isPresented: $showPaywallLocal) {
+            NavigationStack {
+                PaywallView()
+                    .navigationTitle("Toku Budget Premium")
+                    .closeToolbar { showPaywallLocal = false }
+            }
+            .frame(minWidth: 640, minHeight: 560)
+        }
     }
 }
 
@@ -540,8 +712,6 @@ struct TrashToolsView: View {
         }
     }
 
-    // MARK: - Batch delete
-
     private func nukeAllTransactions() async {
         isWorking = true
         defer { isWorking = false }
@@ -550,10 +720,9 @@ struct TrashToolsView: View {
         let req = NSBatchDeleteRequest(fetchRequest: fetch)
         req.resultType = .resultTypeObjectIDs
 
-        do {
+    do {
             if let res = try moc.execute(req) as? NSBatchDeleteResult,
                let deletedIDs = res.result as? [NSManagedObjectID] {
-                // Make existing FRCs / @FetchRequest update immediately
                 let changes: [AnyHashable: Any] = [NSDeletedObjectsKey: deletedIDs]
                 NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [moc])
             }
@@ -564,6 +733,13 @@ struct TrashToolsView: View {
         }
     }
 }
+
+
+
+
+
+
+
 
 
 

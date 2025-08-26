@@ -12,6 +12,7 @@ import Charts
 struct TrendsView: View {
     let window: DateWindow
     @Environment(\.managedObjectContext) private var moc
+    @EnvironmentObject private var premium: PremiumStore   // ⬅️ paywall state
 
     // Pull transactions only for the selected window
     @FetchRequest private var txs: FetchedResults<Transaction>
@@ -22,7 +23,8 @@ struct TrendsView: View {
     init(window: DateWindow) {
         self.window = window
         let req: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        req.predicate = NSPredicate(format: "date >= %@ AND date < %@", window.start as NSDate, window.end as NSDate)
+        req.predicate = NSPredicate(format: "date >= %@ AND date < %@",
+                                    window.start as NSDate, window.end as NSDate)
         req.sortDescriptors = [NSSortDescriptor(key: "date", ascending: true)]
         _txs = FetchRequest(fetchRequest: req, animation: .default)
     }
@@ -120,11 +122,14 @@ struct TrendsView: View {
                 header
 
                 if dayTotals.isEmpty {
-                    ContentUnavailableView("No expenses in this range",
-                                           systemImage: "chart.line.uptrend.xyaxis",
-                                           description: Text("Add some transactions to see trends."))
-                        .frame(maxWidth: .infinity, minHeight: 240)
+                    ContentUnavailableView(
+                        "No expenses in this range",
+                        systemImage: "chart.line.uptrend.xyaxis",
+                        description: Text("Add some transactions to see trends.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 240)
                 } else {
+                    // Free chart
                     TrendChart(dayTotals: dayTotals,
                                movingAvg: showMovingAverage ? movingAvg7 : [],
                                spikeDates: topSpikeDates,
@@ -133,7 +138,7 @@ struct TrendsView: View {
                         .frame(height: 300)
                         .card()
 
-                    // Quick metrics
+                    // Free quick metrics
                     MetricsRow(
                         total: totalSpent,
                         avgPerActiveDay: avgPerActiveDay,
@@ -144,18 +149,43 @@ struct TrendsView: View {
                     )
                     .card()
 
-                    // Weekly totals + Weekday breakdown
+                    // 🔒 Weekly totals + By weekday (each locked)
                     HStack(alignment: .top, spacing: 16) {
-                        WeeklyTotalsChart(bins: weeklyTotals, currencyCode: currencyCode)
-                            .frame(height: 220)
-                        WeekdayBreakdownChart(bins: weekdayAgg, currencyCode: currencyCode)
-                            .frame(height: 220)
-                    }
-                    .card()
+                        PremiumLockedCard(
+                            title: "Upgrade to Premium",
+                            subtitle: "Track weekly spending trends over time"
+                        ) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Weekly totals").bold()
+                                WeeklyTotalsChart(bins: weeklyTotals, currencyCode: currencyCode)
+                                    .frame(height: 220)
+                            }
+                            .card()
+                        }
+                        .frame(maxWidth: .infinity)
 
-                    // Top purchases
-                    TopSpendsList(items: topPurchases(limit: 5), currencyCode: currencyCode)
-                        .card()
+                        PremiumLockedCard(
+                            title: "Upgrade to Premium",
+                            subtitle: "See which weekdays you spend the most"
+                        ) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("By weekday").bold()
+                                WeekdayBreakdownChart(bins: weekdayAgg, currencyCode: currencyCode)
+                                    .frame(height: 220)
+                            }
+                            .card()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    // 🔒 Top purchases list
+                    PremiumLockedCard(
+                        title: "Upgrade to Premium",
+                        subtitle: "Discover your top purchases automatically"
+                    ) {
+                        TopSpendsList(items: topPurchases(limit: 5), currencyCode: currencyCode)
+                            .card()
+                    }
                 }
             }
             .padding(16)
@@ -241,8 +271,7 @@ private struct TrendChart: View {
                 PointMark(x: .value("Selected", sel.date),
                           y: .value("Spent", sel.total))
                     .symbolSize(70)
-                    .foregroundStyle(Color.accentColor)   // ✅ fix
-                    // .foregroundStyle(.tint)            // ← also fine if you prefer
+                    .foregroundStyle(Color.accentColor)
                     .annotation(position: .top) {
                         Text(sel.total, format: .currency(code: currencyCode))
                             .font(.caption2).bold()
@@ -261,7 +290,6 @@ private struct TrendChart: View {
             let months = cal.dateComponents([.month], from: window.start, to: window.end).month ?? 0
 
             if months >= 10 {
-                // Year view: monthly ticks
                 AxisMarks(values: .stride(by: .month)) { v in
                     AxisGridLine(); AxisTick()
                     if let d = v.as(Date.self) {
@@ -271,7 +299,6 @@ private struct TrendChart: View {
                     }
                 }
             } else if months >= 3 {
-                // Quarter-ish: every 2 weeks
                 AxisMarks(values: .stride(by: .weekOfYear, count: 2)) { v in
                     AxisGridLine(); AxisTick()
                     if let d = v.as(Date.self) {
@@ -281,7 +308,6 @@ private struct TrendChart: View {
                     }
                 }
             } else {
-                // Month: every 2 days
                 AxisMarks(values: .stride(by: .day, count: 2)) { v in
                     AxisGridLine(); AxisTick()
                     if let d = v.as(Date.self) {
@@ -402,13 +428,10 @@ private struct WeeklyTotalsChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Weekly totals").bold()
             Chart {
                 ForEach(bins) { b in
-                    BarMark(
-                        x: .value("Week", b.start),
-                        y: .value("Total", b.total)
-                    )
+                    BarMark(x: .value("Week", b.start),
+                            y: .value("Total", b.total))
                 }
 
                 // 4-week moving average
@@ -419,7 +442,6 @@ private struct WeeklyTotalsChart: View {
                         .foregroundStyle(.green)
                 }
 
-                // Hover/drag selection
                 if let s = selected {
                     RuleMark(x: .value("Selected", s.start))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
@@ -453,13 +475,10 @@ private struct WeeklyTotalsChart: View {
                     }
                 }
             }
-            // Hover/drag tracking
             .chartOverlay { proxy in
                 GeometryReader { geo in
                     let plot = geo[proxy.plotAreaFrame]
                     Rectangle().fill(.clear).contentShape(Rectangle())
-
-                        // iOS / iPadOS
                         .gesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { value in
@@ -470,8 +489,6 @@ private struct WeeklyTotalsChart: View {
                                 }
                                 .onEnded { _ in hoverDate = nil }
                         )
-
-                        // macOS hover
                         #if os(macOS)
                         .onContinuousHover { phase in
                             switch phase {
@@ -490,7 +507,6 @@ private struct WeeklyTotalsChart: View {
         }
     }
 }
-
 
 private struct WeekdayBreakdownChart: View {
     let bins: [TrendsView.WeekdayBin]
@@ -511,16 +527,12 @@ private struct WeekdayBreakdownChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("By weekday").bold()
             Chart {
                 ForEach(bins) { b in
-                    BarMark(
-                        x: .value("Weekday", label(b.weekday)),
-                        y: .value("Total", b.total)
-                    )
+                    BarMark(x: .value("Weekday", label(b.weekday)),
+                            y: .value("Total", b.total))
                 }
 
-                // Hover/drag selection
                 if let s = selected {
                     RuleMark(x: .value("Selected", label(s.weekday)))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
@@ -546,13 +558,10 @@ private struct WeekdayBreakdownChart: View {
                     }
                 }
             }
-            // Hover/drag tracking for categorical x-axis
             .chartOverlay { proxy in
                 GeometryReader { geo in
                     let plot = geo[proxy.plotAreaFrame]
                     Rectangle().fill(.clear).contentShape(Rectangle())
-
-                        // iOS / iPadOS
                         .gesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { value in
@@ -563,8 +572,6 @@ private struct WeekdayBreakdownChart: View {
                                 }
                                 .onEnded { _ in hoverCategory = nil }
                         )
-
-                        // macOS hover
                         #if os(macOS)
                         .onContinuousHover { phase in
                             switch phase {
@@ -583,7 +590,6 @@ private struct WeekdayBreakdownChart: View {
         }
     }
 }
-
 
 private struct TopSpendsList: View {
     let items: [Transaction]
@@ -631,5 +637,6 @@ private func movingAverage(_ values: [Double], period: Int) -> [Double] {
     }
     return out
 }
+
 
 

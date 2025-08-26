@@ -7,26 +7,48 @@
 
 import SwiftUI
 
+// Light/Dark only
 enum AppAppearance: String, CaseIterable, Identifiable {
-    case system, light, dark
+    case light, dark
     var id: Self { self }
+
     var colorScheme: ColorScheme? {
-        switch self { case .system: nil; case .light: .light; case .dark: .dark }
+        switch self {
+        case .light: return .light
+        case .dark:  return .dark
+        }
     }
-    var label: String { ["System","Light","Dark"][self == .system ? 0 : (self == .light ? 1 : 2)] }
+
+    var label: String {
+        switch self {
+        case .light: return "Light"
+        case .dark:  return "Dark"
+        }
+    }
 }
 
+// Segmented control without "System"
+// – defaults to Light the very first run
+// – if a legacy "system" string exists, it is treated as .light
 struct AppearancePicker: View {
-    @AppStorage("appAppearance") private var raw = AppAppearance.system.rawValue
+    @AppStorage("appAppearance") private var raw = AppAppearance.light.rawValue
+
     private var binding: Binding<AppAppearance> {
-        Binding(get: { AppAppearance(rawValue: raw) ?? .system },
-                set: { raw = $0.rawValue })
+        Binding(
+            get: {
+                // Coerce any legacy value (e.g. "system") to a supported case
+                AppAppearance(rawValue: raw) ?? .light
+            },
+            set: { raw = $0.rawValue }
+        )
     }
+
     var body: some View {
         Picker("Appearance", selection: binding) {
             ForEach(AppAppearance.allCases) { Text($0.label).tag($0) }
         }
         .pickerStyle(.segmented)
-        .frame(width: 260)
+        .frame(width: 160)
     }
 }
+

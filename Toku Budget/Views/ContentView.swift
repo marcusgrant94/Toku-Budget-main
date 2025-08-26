@@ -31,6 +31,7 @@ extension Notification.Name {
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var moc
     @Environment(\.colorScheme) private var scheme
+    @EnvironmentObject private var premium: PremiumStore
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Category.name, ascending: true)],
@@ -40,7 +41,8 @@ struct ContentView: View {
     @State private var selection: Section? = .overview
     @State private var rangeMode: DateRangeMode = .month
     @State private var showGoalSheet = false
-    @State private var showSettings = false           // ⬅️ controls the sheet
+    @State private var showSettings = false
+    @State private var showPaywallExport = false// ⬅️ controls the sheet
     @StateObject private var coachChat = ChatVM()
 
     private var window: DateWindow { DateWindow.make(for: rangeMode) }
@@ -138,7 +140,22 @@ struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("Import CSV…") { ImportCoordinator.presentImporter(moc) }
-                    Button("Export CSV…") { ExportCoordinator.presentExporter(moc) }
+
+                    // Export is locked for non-premium users
+                    Button {
+                        if premium.isPremium {
+                            ExportCoordinator.presentExporter(moc)   // ⬅️ call the static func
+                        } else {
+                            showPaywallExport = true
+                        }
+                    } label: {
+                        if premium.isPremium {
+                            Text("Export CSV…")
+                        } else {
+                            Label("Export CSV…", systemImage: "lock.fill")
+                        }
+                    }
+
                     Divider()
                     Button("Settings") { showSettings = true }
                         .keyboardShortcut(",", modifiers: .command)
@@ -146,15 +163,20 @@ struct ContentView: View {
                     Label("Import/Export", systemImage: "arrow.up.arrow.down.square")
                 }
             }
-            #endif
-        }
-        .sheet(isPresented: $showGoalSheet) { SavingsGoalSheet() }
-        .sheet(isPresented: $showSettings) {        // ⬅️ settings sheet
-            NavigationStack { SettingsRootView() }
-                .frame(minWidth: 720, minHeight: 560)
-        }
-        .onChange(of: selection) { print("Sidebar selection ->", String(describing: $0)) }
-    }
+                       #endif
+                   }
+                   .sheet(isPresented: $showGoalSheet) { SavingsGoalSheet() }
+                   .sheet(isPresented: $showSettings) {
+                       NavigationStack { SettingsRootView() }
+                           .frame(minWidth: 720, minHeight: 560)
+                   }
+                   // ⬇️ Paywall for export
+                   .sheet(isPresented: $showPaywallExport) {
+                       NavigationStack { PaywallView() }
+                           .frame(minWidth: 540, minHeight: 680)
+                   }
+                   .onChange(of: selection) { print("Sidebar selection ->", String(describing: $0)) }
+               }
 
     // Seed sample categories
     private func seedIfNeeded() throws {
@@ -208,10 +230,23 @@ struct DateRangePicker: View {
 
 struct CurrencyChips: View {
     @State private var currency = "USD"
+    @State private var showJPYAlert = false
+
     var body: some View {
         HStack(spacing: 8) {
-            Chip(title: "USD", selected: currency == "USD") { currency = "USD" }
-            Chip(title: "JPY", selected: currency == "JPY") { currency = "JPY" }
+            Chip(title: "USD", selected: currency == "USD") {
+                currency = "USD"
+            }
+
+            // Locked JPY: shows an alert instead of switching
+            Chip(title: "JPY", selected: false, locked: true) {
+                showJPYAlert = true
+            }
+        }
+        .alert("JPY coming soon", isPresented: $showJPYAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("We’re adding multi-currency support next. For now, the app uses USD.")
         }
     }
 }
@@ -220,24 +255,37 @@ struct Chip: View {
     @Environment(\.colorScheme) private var scheme
     let title: String
     let selected: Bool
+    var locked: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(.callout)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 10)
-                .background(selected ? Color.accentColor.opacity(0.12) : Theme.card(scheme))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Theme.cardBorder(scheme))
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            HStack(spacing: 6) {
+                Text(title)
+                    .lineLimit(1)
+                if locked {
+                    Image(systemName: "lock.fill")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.callout)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)                     // a touch wider to avoid clipping
+            .fixedSize(horizontal: true, vertical: false)  // <- prevents truncation
+            .background(selected ? Color.accentColor.opacity(0.12) : Theme.card(scheme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.cardBorder(scheme))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .opacity(locked ? 0.85 : 1.0)
         }
         .buttonStyle(.plain)
     }
 }
+
+
 
 // MARK: - Date range model
 

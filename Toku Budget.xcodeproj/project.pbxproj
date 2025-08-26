@@ -6,8 +6,23 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXCopyFilesBuildPhase section */
+		C8CFFAAE2E5CEB520051634E /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		C88F2F822E51288B000BF522 /* Toku Budget.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Toku Budget.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C8CFFA9C2E5CEB510051634E /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		C8CFFA9E2E5CEB510051634E /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -33,6 +48,7 @@
 			isa = PBXGroup;
 			children = (
 				C88F2F842E51288B000BF522 /* Toku Budget */,
+				C8CFFA9B2E5CEB510051634E /* Frameworks */,
 				C88F2F832E51288B000BF522 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -45,6 +61,15 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		C8CFFA9B2E5CEB510051634E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C8CFFA9C2E5CEB510051634E /* WidgetKit.framework */,
+				C8CFFA9E2E5CEB510051634E /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -55,6 +80,7 @@
 				C88F2F7E2E51288B000BF522 /* Sources */,
 				C88F2F7F2E51288B000BF522 /* Frameworks */,
 				C88F2F802E51288B000BF522 /* Resources */,
+				C8CFFAAE2E5CEB520051634E /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -251,12 +277,15 @@
 				CODE_SIGN_ENTITLEMENTS = "Toku Budget/Toku_Budget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "\"Toku Budget/Preview Content\"";
 				DEVELOPMENT_TEAM = CRH4BNJVR7;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Toku-Budget-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Toku Budget";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.finance";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -279,12 +308,15 @@
 				CODE_SIGN_ENTITLEMENTS = "Toku Budget/Toku_Budget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "\"Toku Budget/Preview Content\"";
 				DEVELOPMENT_TEAM = CRH4BNJVR7;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Toku-Budget-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Toku Budget";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.finance";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
